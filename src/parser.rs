@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::storage::{Column, DataType, Value};
 use anyhow::{Result, anyhow};
 
@@ -30,6 +32,11 @@ pub enum Statement {
     },
     DropTable {
         name: String,
+    },
+    CreateIndex {
+        name: String,
+        table: String,
+        columns: Vec<String>,
     },
 }
 
@@ -105,9 +112,7 @@ impl Condition {
 
         match self {
             Condition::Equal { column, value } => {
-                get_column_index(column).map_or(false, |idx| {
-                    row[idx] == *value
-                })
+                get_column_index(column).map_or(false, |idx| row[idx] == *value)
             }
             Condition::NotEqual { column, value } => {
                 get_column_index(column).map_or(false, |idx| row[idx] != *value)
@@ -248,24 +253,21 @@ impl Parser {
             "FALSE",
         ];
 
-        let operators = ["=", "<>", ">", "<", ">=", "<=", "+", "-", "*", "/", "%"];
+        let operators = ["=", "<>", ">=", "<=", ">", "<", "+", "-", "*", "/", "%"];
         let punctuation = ["(", ")", ",", ";", "."];
 
         while position < input.len() {
             let remainder = &input[position..];
 
-            // Skip whitespace
             if let Some(whitespace_len) = remainder.find(|c: char| !c.is_whitespace()) {
                 if whitespace_len > 0 {
                     position += whitespace_len;
                     continue;
                 }
             } else {
-                // All remaining characters are whitespace
                 break;
             }
 
-            // Comments
             if remainder.starts_with("--") {
                 let end = remainder.find('\n').unwrap_or(remainder.len());
                 tokens.push(Token {
@@ -277,7 +279,6 @@ impl Parser {
                 continue;
             }
 
-            // String literals
             if remainder.starts_with('\'') || remainder.starts_with('"') {
                 let quote = remainder.chars().next().unwrap();
                 let mut end = 1;
@@ -311,7 +312,6 @@ impl Parser {
                 continue;
             }
 
-            // Numeric literals
             if remainder.chars().next().unwrap().is_digit(10) {
                 let mut end = 0;
                 let mut has_dot = false;
@@ -337,7 +337,6 @@ impl Parser {
                 continue;
             }
 
-            // Operators (check longer operators first)
             let mut operator_match = false;
             for op in operators.iter() {
                 if remainder.starts_with(op) {
@@ -355,7 +354,6 @@ impl Parser {
                 continue;
             }
 
-            // Punctuation
             let mut punct_match = false;
             for p in punctuation.iter() {
                 if remainder.starts_with(p) {
@@ -373,7 +371,6 @@ impl Parser {
                 continue;
             }
 
-            // Identifiers & Keywords
             if remainder.chars().next().unwrap().is_alphabetic() || remainder.starts_with('_') {
                 let mut end = 0;
                 while end < remainder.len() {
@@ -401,7 +398,6 @@ impl Parser {
                 continue;
             }
 
-            // If we get here, we couldn't parse the character
             return Err(anyhow!(
                 "Unexpected character at position {}: {}",
                 position,
@@ -465,6 +461,29 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement> {
         self.consume("CREATE")?;
+        if self.peek()?.value.to_uppercase() == "INDEX" {
+            self.advance()?;
+            let name = self.consume_any(&[TokenType::Identifier])?.value.clone();
+            self.consume("ON")?;
+            let table = self.consume_any(&[TokenType::Identifier])?.value.clone();
+            self.consume("(")?;
+
+            let mut columns = Vec::new();
+            while self.peek()?.value != ")" {
+                let column = self.consume_any(&[TokenType::Identifier])?.value.clone();
+                columns.push(column);
+                if self.peek()?.value != ")" {
+                    self.consume(",")?;
+                }
+            }
+
+            return Ok(Statement::CreateIndex {
+                name,
+                table,
+                columns,
+            });
+        }
+
         self.consume("TABLE")?;
         let name = self.consume_any(&[TokenType::Identifier])?.value.clone();
         self.consume("(")?;
@@ -509,7 +528,6 @@ impl Parser {
         self.consume("INTO")?;
         let table = self.consume_any(&[TokenType::Identifier])?.value.clone();
 
-        // Optional column list
         let mut columns = None;
         if self.peek()?.value == "(" {
             self.advance()?;
@@ -537,7 +555,6 @@ impl Parser {
 
         let mut all_values = Vec::new();
 
-        // Parse multiple value lists for bulk insert
         loop {
             self.consume("(")?;
 
@@ -556,12 +573,10 @@ impl Parser {
                 }
             }
 
-            // Check if there are more value lists
             if self.current >= self.tokens.len() || self.peek()?.value != "," {
                 break;
             } else {
-                self.advance()?; // Consume the comma
-                // Make sure the next token is "("
+                self.advance()?;
                 if self.peek()?.value != "(" {
                     return Err(anyhow!("Expected '(' after ',' in VALUES clause"));
                 }
@@ -579,7 +594,6 @@ impl Parser {
         self.consume("SELECT")?;
         let mut columns = Vec::new();
 
-        // Parse column list
         loop {
             let token = self.peek()?;
             if token.value == "*" {
@@ -610,17 +624,15 @@ impl Parser {
         self.consume("FROM")?;
         let table = self.consume_any(&[TokenType::Identifier])?.value.clone();
 
-        // Parse WHERE clause
         let mut conditions = None;
         if self.current < self.tokens.len() && self.peek()?.value.to_uppercase() == "WHERE" {
-            self.advance()?; // Consume WHERE
+            self.advance()?;
             conditions = Some(self.parse_conditions()?);
         }
 
-        // Parse ORDER BY clause
         let mut order_by = None;
         if self.current < self.tokens.len() && self.peek()?.value.to_uppercase() == "ORDER" {
-            self.advance()?; // Consume ORDER
+            self.advance()?;
             self.consume("BY")?;
             let column = self.consume_any(&[TokenType::Identifier])?.value.clone();
 
@@ -643,10 +655,9 @@ impl Parser {
             order_by = Some(OrderBy { column, direction });
         }
 
-        // Parse LIMIT clause
         let mut limit = None;
         if self.current < self.tokens.len() && self.peek()?.value.to_uppercase() == "LIMIT" {
-            self.advance()?; // Consume LIMIT
+            self.advance()?;
             let limit_token = self
                 .consume_any(&[TokenType::NumericLiteral])?
                 .value
@@ -684,12 +695,12 @@ impl Parser {
             if self.peek()?.value != "," {
                 break;
             }
-            self.advance()?; // Consume the comma
+            self.advance()?;
         }
 
         let mut conditions = None;
         if self.current < self.tokens.len() && self.peek()?.value.to_uppercase() == "WHERE" {
-            self.advance()?; // Consume WHERE
+            self.advance()?;
             conditions = Some(self.parse_conditions()?);
         }
 
@@ -707,7 +718,7 @@ impl Parser {
 
         let mut conditions = None;
         if self.current < self.tokens.len() && self.peek()?.value.to_uppercase() == "WHERE" {
-            self.advance()?; // Consume WHERE
+            self.advance()?;
             conditions = self.parse_conditions()?;
         }
 
@@ -759,14 +770,14 @@ impl Parser {
         let column = self.consume_any(&[TokenType::Identifier])?.value.clone();
 
         if self.peek()?.value.to_uppercase() == "IS" {
-            self.advance()?; // Consume IS
+            self.advance()?;
 
             if self.peek()?.value.to_uppercase() == "NOT" {
-                self.advance()?; // Consume NOT
+                self.advance()?;
                 self.consume("NULL")?;
                 return Ok(Some(Condition::IsNotNull { column }));
             } else if self.peek()?.value.to_uppercase() == "NULL" {
-                self.advance()?; // Consume NULL
+                self.advance()?;
                 return Ok(Some(Condition::IsNull { column }));
             } else {
                 return Err(anyhow!("Expected NULL after IS"));
